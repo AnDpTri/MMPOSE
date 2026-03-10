@@ -13,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # ─── THIẾT LẬP CHÍNH (THE HEART) ──────────────────────────────────────────────
 # 'face' : Tự động chạy YOLO Face -> MediaPipe Landmarks
 # 'head' : Chỉ chạy YOLO Head Detection
-MODEL_TYPE = 'head' 
+MODEL_TYPE = 'face' 
 
 # 'webcam' : Chạy thời gian thực qua camera
 # 'batch'  : Chạy xử lý hàng loạt ảnh trong thư mục input
@@ -36,11 +36,11 @@ MP_MAX_FACES = 5
 MP_REFINE_LANDMARKS = True
 MP_STATIC_MODE = (RUN_MODE == 'batch')
 
-# ─── THƯ MỤC DỮ LIỆU ─────────────────────────────────────────────────────────
+# ─── THƯ MỤC DỮ LIỆU (GLOBAL ROOT) ───────────────────────────────────────────
 # Tự động điều chỉnh đường dẫn dựa trên MODEL_TYPE
-INPUT_DIR = BASE_DIR / "yolov8_head" / "input"
-OUTPUT_BASE = BASE_DIR / "yolov8_head" / "output"
-DATA_BASE = BASE_DIR / "face_landmark" / "data"
+INPUT_DIR = BASE_DIR / "input"
+OUTPUT_BASE = BASE_DIR / "output"
+DATA_BASE = BASE_DIR / "data"
 
 # Đường dẫn cụ thể cho từng loại detect
 CURRENT_OUTPUT_DIR = OUTPUT_BASE / MODEL_TYPE
