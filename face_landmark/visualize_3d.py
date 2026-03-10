@@ -168,10 +168,13 @@ def main():
     # parser.add_argument("--dir", type=str, default="data", help="Thư mục chứa data") # Removed as config.DATA_DIR is used
     args = parser.parse_args()
 
-    data_dir = config.DATA_DIR # Use config.DATA_DIR
+    data_dir = config.CURRENT_DATA_DIR # Use config.CURRENT_DATA_DIR
     if args.file:
         file_to_load = Path(args.file)
     else:
+        if not data_dir.exists():
+            print(f"[!] Không tìm thấy thư mục dữ liệu: {data_dir}")
+            return
         files = sorted([p for p in data_dir.iterdir() if p.suffix.lower() in [".json", ".csv"]])
         if not files:
             print(f"[!] Không tìm thấy dữ liệu trong '{data_dir}'")

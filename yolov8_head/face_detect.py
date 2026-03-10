@@ -11,10 +11,10 @@ import config
 from ultralytics import YOLO
 
 def run_webcam():
-    model_path = config.YOLO_HEAD_MODEL
+    model_path = config.YOLO_FACE_MODEL
     device = config.get_device()
     
-    print(f"[*] Loading Head Model: {model_path} (Device: {device})")
+    print(f"[*] Loading Face Model: {model_path} (Device: {device})")
     model = YOLO(str(model_path)).to(device)
     
     cap = cv2.VideoCapture(0)
@@ -22,7 +22,7 @@ def run_webcam():
         print("[!] Error: Could not open camera.")
         return
 
-    print("[▶] Running Head Detection (Webcam). Press 'Q' to quit.")
+    print("[▶] Running Face Detection (Webcam). Press 'Q' to quit.")
     
     while True:
         ret, frame = cap.read()
@@ -33,11 +33,11 @@ def run_webcam():
         for box in results.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             conf = float(box.conf[0])
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 200, 255), 2)
-            cv2.putText(frame, f"Head {conf:.2f}", (x1, y1 - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, f"Face {conf:.2f}", (x1, y1 - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
-        cv2.imshow("Head Detection", frame)
+        cv2.imshow("Face Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
             

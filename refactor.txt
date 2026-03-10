@@ -1,0 +1,29 @@
+D:\MMPOSE
+├── .gitignore              # Quy định các file không đẩy lên GitHub
+├── config.py               # Cấu hình chung cho dự án
+├── requirements.txt         # Danh sách các thư viện cần cài đặt
+├── venv/                   # Môi trường ảo (chứa python và thư viện)
+│
+├── face_landmark/          # Module xử lý điểm mốc khuôn mặt
+│   ├── batch_landmark.py   # Chạy xử lý hàng loạt ảnh trả về json data về các bộ phận trên khuôn mặt (thu thập khi chạy mediapipe)
+│   ├── landmark_detect.py  # Script nhận diện chính qua webcam 
+│   # 2 file này sẽ được chạy thông qua việc chạy mô hình yolov8 (loại nào sẽ được config trong file config main (face hoặc head)), crop ảnh đã được detect bởi yolo để làm input cho mediapipe
+│   ├── run_batch.bat       # File thực thi nhanh trên Windows
+│   ├── weights/            # Chứa các file model (.pth, .onnx)
+│   ├── input/              # Ảnh đầu vào để chạy batch   
+│   └── outputs/            # Kết quả sau khi chạy batch
+│   └── visualize_3d.py     # lấy dữ liệu json ở /data để render 3d (dựa vào logic sẵn có)
+│
+├── yolov8_head/            # Module nhận diện đầu/mặt bằng YOLOv8
+│   ├── head_detect.py      # Nhận diện đầu qua webcam
+│   ├── head_batch.py     # Nhận diện đầu hàng loạt ảnh
+│   ├── face_detect.py      # Nhận diện mặt qua webcam
+│   ├── face_batch.py       # Nhận diện mặt qua ảnh (/input, /output)
+│   ├── yolov8n-face.pt     # Trọng số model mặt
+│   ├── yolov8n-head.pt     # Trọng số model đầu
+│   ├── input/              # Ảnh đầu vào để test
+│   └── output/             # Ảnh kết quả sau khi vẽ box
+│
+└── gesture_gaze/           # (Thư mục trống) Dự kiến cho cử chỉ và hướng mắt
+
+thêm main config quản lý toàn bộ dự án(các tham số như cpu,gpu, model,....)
