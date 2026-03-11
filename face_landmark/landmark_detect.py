@@ -105,24 +105,21 @@ def run_live():
                         for idx in indices:
                             if idx < len(face_landmarks.landmark):
                                 lm = face_landmarks.landmark[idx]
-                                # Tọa độ tuyệt đối theo Pixel của ảnh gốc
-                                px = (lm.x * w_c) + x1
-                                py = (lm.y * h_c) + y1
-                                pz = (lm.z * w_c)
                                 
-                                pixel_coords[idx] = (int(px), int(py))
+                                # Tọa độ pixel để vẽ
+                                px = int(lm.x * w_c + x1)
+                                py = int(lm.y * h_c + y1)
+                                pixel_coords[idx] = (px, py)
                                 
-                                # Chuyển đổi sang chuẩn trục Vật lý (Upright 3D) như test.py để tính Vector
-                                std_x = px
-                                std_y = -pz
-                                std_z = -py
-                                points_3d[idx] = (std_x, std_y, std_z)
+                                # Lưu tọa độ normalize gốc của MediaPipe cho việc tính Gaze Vector
+                                # (x, y ∈ [0,1] trong crop, z tương đối)
+                                points_3d[idx] = (lm.x, lm.y, lm.z)
                                 
                                 # Highlight Iris (Gaze Estimation focus)
                                 if part_name == "iris":
-                                    cv2.circle(frame, (int(px), int(py)), 2, FACE_PARTS_COLORS[part_name], -1)
+                                    cv2.circle(frame, (px, py), 2, FACE_PARTS_COLORS[part_name], -1)
                                 else:
-                                    cv2.circle(frame, (int(px), int(py)), 1, FACE_PARTS_COLORS[part_name], -1)
+                                    cv2.circle(frame, (px, py), 1, FACE_PARTS_COLORS[part_name], -1)
 
                     # Draw Mesh Connections
                     for conn in MESH_CONNECTIONS:
@@ -149,14 +146,16 @@ def run_live():
                         p331 = points_3d[331]
                         p102 = points_3d[102]
                         
-                        # Tính tọa độ đích trong không gian 3D Vật lý
+                        # Tính tọa độ đích trong hệ tọa độ normalize của MediaPipe
                         try:
-                            target_3d = calculate_target_point(p168, p331, p102, k=150.0)
+                            # k=0.3 tương đương 30% chiều rộng khuôn mặt
+                            target_3d = calculate_target_point(p168, p331, p102, k=0.3)
                             
-                            # Chiếu 3D ngược lại 2D (Chỉ cần lấy X và Z, ném bỏ Y chiều sâu)
-                            # Từ code trên: px = std_x, py = -std_z => target_px = target_x, target_py = -target_z
-                            target_px = int(target_3d[0])
-                            target_py = int(-target_3d[2])
+                            # Chiếu ngược về 2D pixel đơn giản:
+                            # x_norm -> int(x_norm * w_c + x1)
+                            # y_norm -> int(y_norm * h_c + y1)
+                            target_px = int(target_3d[0] * w_c + x1)
+                            target_py = int(target_3d[1] * h_c + y1)
                             start_px_168, start_py_168 = pixel_coords[168]
                             
                             # Vẽ Tam giác tham chiếu 168-331-102 (Cyan)

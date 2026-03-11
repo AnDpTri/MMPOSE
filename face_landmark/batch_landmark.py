@@ -103,24 +103,19 @@ def process_batch():
                     for part_name, indices in FACE_PARTS_INDICES.items():
                         part_list = []
                         for idx in indices:
-                            # a. Regular Landmarks -> ĐƯA VỀ CHUẨN PIXEL ĐỂ X, Y, Z ĐỒNG NHẤT TỈ LỆ
                             if idx < len(face_landmarks.landmark):
                                 lm = face_landmarks.landmark[idx]
                                 
-                                # X, Y tính theo Pixel trên ảnh gốc
-                                px = (lm.x * w_c) + x1
-                                py = (lm.y * h_c) + y1
-                                # Z của MediaPipe tỉ lệ thuận với width của crop, quy đổi ra Pixel
-                                pz = lm.z * w_c 
+                                # Lưu tọa độ normalize gốc của MediaPipe (x,y ∈ [0,1] trong crop, z tương đối)
+                                part_list.append({"x": lm.x, "y": lm.y, "z": lm.z})
                                 
-                                part_list.append({"x": px, "y": py, "z": pz})
-                                pixel_coords[idx] = (int(px), int(py))
+                                # Tọa độ pixel để vẽ vào ảnh
+                                px = int(lm.x * w_c + x1)
+                                py = int(lm.y * h_c + y1)
+                                pixel_coords[idx] = (px, py)
                                 
-                                # Chuyển đổi sang chuẩn trục Vật lý (Upright 3D) như test.py để tính Vector
-                                std_x = px
-                                std_y = -pz
-                                std_z = -py
-                                points_3d[idx] = (std_x, std_y, std_z)
+                                # Giữ nguyên tọa độ normalize để tính Gaze Vector
+                                points_3d[idx] = (lm.x, lm.y, lm.z)
                         
                         parts_json[part_name] = part_list
                     
@@ -156,13 +151,16 @@ def process_batch():
                         p331 = points_3d[331]
                         p102 = points_3d[102]
                         
-                        # Tính tọa độ đích trong không gian 3D Vật lý
+                        # Tính pháp tuyến trong hệ normalize gốc của MediaPipe
                         try:
-                            target_3d = calculate_target_point(p168, p331, p102, k=150.0)
+                            # k=0.3 tương đương 30% chiều rộng khuôn mặt
+                            target_3d = calculate_target_point(p168, p331, p102, k=0.3)
                             
-                            # Chiếu 3D ngược lại 2D (Chỉ cần lấy X và Z, ném bỏ Y chiều sâu)
-                            target_px = int(target_3d[0])
-                            target_py = int(-target_3d[2])
+                            # Chiếu ngược về 2D pixel:
+                            # x_norm -> int(x_norm * w_c + x1)
+                            # y_norm -> int(y_norm * h_c + y1)
+                            target_px = int(target_3d[0] * w_c + x1)
+                            target_py = int(target_3d[1] * h_c + y1)
                             start_px_168, start_py_168 = pixel_coords[168]
                             
                             # Vẽ Tam giác tham chiếu 168-331-102 (Cyan)
