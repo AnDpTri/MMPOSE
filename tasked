@@ -1,0 +1,32 @@
+Task: Advanced Gaze Vector Fix & HTML Vis
+ Standardize local Ox/Oy axes (Horizontal/Vertical)
+ Refine 3D visualization (Detail & Zoom)
+ Fix eyeball center O formula
+ Fix 'tuple' type error and detection fallback
+ Implement HTML 3D visualization (Plotly)
+ Display Alpha/D metrics in all modules
+ Enable landmark ID display in all modules
+ Implement global landmark ID toggle as a menu option
+ Refine 3D ID visibility for pupils and centers
+ Implement Video Input Processing
+ Implement Progress Logging (Batch & Video)
+ Optimize Video Processing (Reduce CPU/GPU hang)
+ Implement Ultra-Safe Video Mode (Throttle & No-Preview option)
+ Lazy Load heavy modules (Torch/YOLO/MediaPipe/Plotly) to prevent startup hangs
+ Fix Video Processing Loop Stability (Race conditions & Error handling)
+ Fix NameError (numpy) in Lazy Load refactor
+ Implement Gaze Vector Smoothing (EMA filter)
+ Implement Face vs. Eye Gaze Toggle (Face-only mode)
+ Remove Eye Mesh/Iris visualization from default view
+ Implement unique color assignment for each detected face
+ Create Gaze Logic Backup script
+ Optimize Face-only mode (skip eye math for performance)
+ Optimize FPS for Webcam (YOLO frame skipping & tracking)
+ Research and Plan Multi-Object Tracking (for stable colors)
+ Implement Lightweight IoU Tracker
+ Add CPU/GPU Toggle to menu & Set default configurations
+ Identify and Fix GPU environment issue (Torch-CPU vs CUDA)
+ Add FPS counter for Video Processing
+ Enhance Gaze Visualization (2x length, dot end) & Per-face Smoothing
+ Add specialized Settings Menu for parameter tuning
+ Final verification & Walkthrough

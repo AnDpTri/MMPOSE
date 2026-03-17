@@ -20,6 +20,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.env 
 
 # Virtual Environment
 venv/
@@ -29,8 +30,14 @@ ENV/
 .vscode/
 .idea/
 
-# Large models or weights (optional, usually kept on Git LFS or ignored)
-*.pth
-*.onnx
-*.weights
-*.pt
+# Input/Output data
+input/
+output/
+data/
+yolov8_head/*.pt
+yolov8_head/*.pth
+*.mp4
+*.avi
+*.mkv
+*.csv
+!requirements.txt
