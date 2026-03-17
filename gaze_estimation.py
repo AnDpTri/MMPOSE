@@ -15,13 +15,12 @@ Phím tắt (chế độ Webcam):
 =============================================================
 """
 
-import cv2
-import sys
-import csv
-import time
+import cv2, sys, csv, time, torch
+import numpy as np
 from pathlib import Path
+from scipy.optimize import linear_sum_assignment
 
-# Các thư viện nặng sẽ được lazy-load trong hàm (torch, numpy, plotly, mediapipe, yolo)
+# Note: Heavy libraries (mediapipe, ultralytics, plotly, filterpy) are lazy-loaded unless specified.
 
 # ------------------------------------------------------------------ #
 #  CẤU HÌNH                                                           #
@@ -44,10 +43,12 @@ for d in [INPUT_VIDEO, OUTPUT_BATCH, OUTPUT_VIS_2D, OUTPUT_VIS_3D, OUTPUT_WEBCAM
 CAMERA_ID    = 0
 GLOBAL_CONFIG = {
     "show_ids": False,     # Mặc định TẮT Landmark IDs
-    "smooth_alpha": 0.8,   # 0.1: mượt/trễ, 0.9: nhạy/rung
-    "use_eye_gaze": False, # Mặc định Chỉ Mặt
+    "smooth_alpha": 0.6,   # 0.1: mượt/trễ, 0.9: nhạy/rung
+    "use_eye_gaze": True, # Mặc định Chỉ Mặt
     "force_device": "cuda",# Mặc định chạy CUDA
-    "yolo_conf": 0.35,     # Ngưỡng tin cậy YOLO
+    "multi_face": True,    # Mặc định theo dõi đa đối tượng (Robust)
+    "yolo_conf": 0.7,     # Ngưỡng tin cậy YOLO
+    "roi_padding": 0.355,  # Hệ số lề vùng cắt (Crop padding)
     "S_H": 28.0,           # Độ nhạy ngang
     "S_V": 12.35           # Độ nhạy dọc
 }
@@ -56,81 +57,108 @@ GLOBAL_CONFIG = {
 FACE_COLOR = (0, 255, 0)
 
 
+def calculate_iou(b1, b2):
+    xA, yA = max(b1[0], b2[0]), max(b1[1], b2[1])
+    xB, yB = min(b1[2], b2[2]), min(b1[3], b2[3])
+    inter = max(0, xB - xA) * max(0, yB - yA)
+    area1, area2 = (b1[2]-b1[0])*(b1[3]-b1[1]), (b2[2]-b2[0])*(b2[3]-b2[1])
+    return inter / float(area1 + area2 - inter + 1e-6)
+
+class KalmanBoxTracker:
+    count = 0
+    def __init__(self, bbox):
+        from filterpy.kalman import KalmanFilter
+        self.kf = KalmanFilter(dim_x=7, dim_z=4)
+        self.kf.F = np.array([[1,0,0,0,1,0,0],[0,1,0,0,0,1,0],[0,0,1,0,0,0,1],[0,0,0,1,0,0,0],
+                              [0,0,0,0,1,0,0],[0,0,0,0,0,1,0],[0,0,0,0,0,0,1]])
+        self.kf.H = np.eye(4, 7); self.kf.R[2:,2:] *= 10.
+        self.kf.P[4:,4:] *= 1000.; self.kf.P *= 10.
+        self.kf.Q[4:,4:] *= 0.01; self.kf.Q[-1,-1] *= 0.01
+        self.kf.x[:4] = self._box_to_z(bbox)
+        self.id, self.time_since_update, self.hits, self.hit_streak, self.age = KalmanBoxTracker.count, 0, 0, 0, 0
+        self.history, self.smooth_gaze = [], None
+        self.mesh = None # Lazy load per ID
+        KalmanBoxTracker.count += 1
+
+    def get_mesh(self):
+        if self.mesh is None: self.mesh = make_face_mesh(static=False)
+        return self.mesh
+
+    def close(self):
+        if self.mesh: self.mesh.close(); self.mesh = None
+
+    def update(self, bbox):
+        self.time_since_update, self.history = 0, []
+        self.hits += 1; self.hit_streak += 1
+        self.kf.update(self._box_to_z(bbox))
+
+    def predict(self):
+        if (self.kf.x[6]+self.kf.x[2]) <= 0: self.kf.x[6] *= 0.0
+        self.kf.predict(); self.age += 1
+        if self.time_since_update > 0: self.hit_streak = 0
+        self.time_since_update += 1
+        self.history.append(self._x_to_box(self.kf.x))
+        return self.history[-1][0]
+
+    def get_state(self): return self._x_to_box(self.kf.x)[0]
+
+    def _box_to_z(self, b):
+        w, h = b[2]-b[0], b[3]-b[1]
+        return np.array([b[0]+w/2., b[1]+h/2., w*h, w/float(h)]).reshape((4,1))
+
+    def _x_to_box(self, x):
+        w = np.sqrt(x[2] * x[3]); h = x[2]/w
+        return np.array([x[0]-w/2., x[1]-h/2., x[0]+w/2., x[1]+h/2.]).reshape((1,4))
+
 class FaceTracker:
-    def __init__(self, iou_threshold=0.3, max_lost=15):
-        self.iou_threshold = iou_threshold
-        self.max_lost = max_lost
-        self.tracks = {}  # {id: {"box": [x1,y1,x2,y2], "lost": 0, "smooth_gaze": None}}
-        self.next_id = 0
+    def __init__(self, iou_threshold=0.3, max_lost=15, min_hits=3):
+        self.iou_threshold, self.max_lost, self.min_hits = iou_threshold, max_lost, min_hits
+        self.trackers, self.frame_count = [], 0
 
     def update(self, yolo_res):
-        if yolo_res is None or not len(yolo_res):
-            for tid in self.tracks: self.tracks[tid]["lost"] += 1
-            self._cleanup()
-            return []
-
-        new_boxes = []
-        for box in yolo_res:
-            new_boxes.append(box.xyxy[0].tolist())
-
-        matched_indices = {} # new_box_idx -> track_id
+        self.frame_count += 1
+        dets = np.array([b.xyxy[0].tolist() for b in yolo_res]) if yolo_res else np.empty((0, 4))
+        trks = np.array([t.predict() for t in self.trackers] or np.empty((0, 4)))
         
-        # 1. Match with existing tracks
-        for tid, track in self.tracks.items():
-            best_iou = 0
-            best_idx = -1
-            for b_idx, box in enumerate(new_boxes):
-                if b_idx in matched_indices: continue
-                iou = self._iou(track["box"], box)
-                if iou > best_iou:
-                    best_iou, best_idx = iou, b_idx
-            
-            if best_iou > self.iou_threshold:
-                matched_indices[best_idx] = tid
-                self.tracks[tid]["box"] = new_boxes[best_idx]
-                self.tracks[tid]["lost"] = 0
-            else:
-                self.tracks[tid]["lost"] += 1
+        # Build IOU matrix and Associate
+        iou_mat = np.array([[calculate_iou(d, t) for t in trks] for d in dets]) if len(trks) else np.empty((len(dets), 0))
+        matched, unmatched_dets, _ = self._associate(iou_mat, len(dets), len(trks))
 
-        # 2. Add new tracks
-        for b_idx, box in enumerate(new_boxes):
-            if b_idx not in matched_indices:
-                self.tracks[self.next_id] = {"box": box, "lost": 0, "smooth_gaze": None}
-                matched_indices[b_idx] = self.next_id
-                self.next_id += 1
+        for m in matched: self.trackers[m[1]].update(dets[m[0]])
+        for i in unmatched_dets: self.trackers.append(KalmanBoxTracker(dets[i]))
+        
+        ret = []
+        for i in reversed(range(len(self.trackers))):
+            trk = self.trackers[i]
+            if trk.time_since_update > self.max_lost: trk.close(); self.trackers.pop(i); continue
+            if trk.time_since_update < 1 and (trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits):
+                # Matching back to original YOLO objects for metadata
+                best_idx = np.argmax([calculate_iou(trk.get_state(), d) for d in dets]) if len(dets) else -1
+                if best_idx != -1 and calculate_iou(trk.get_state(), dets[best_idx]) > 0.5:
+                    ret.append((yolo_res[best_idx], trk.id))
+        return ret
 
-        self._cleanup()
+    def _associate(self, iou_mat, num_dets, num_trks):
+        if not num_trks or not num_dets: return np.empty((0,2), int), np.arange(num_dets), np.arange(num_trks)
+        row_ind, col_ind = linear_sum_assignment(-iou_mat)
+        matched = np.array([[r, c] for r, c in zip(row_ind, col_ind) if iou_mat[r, c] >= self.iou_threshold])
+        unmatched_dets = [i for i in range(num_dets) if i not in (matched[:,0] if len(matched) else [])]
+        unmatched_trks = [i for i in range(num_trks) if i not in (matched[:,1] if len(matched) else [])]
+        return matched, np.array(unmatched_dets), np.array(unmatched_trks)
 
-        # 3. Return results: list of (original_box_obj, track_id)
-        results = []
-        for b_idx, box in enumerate(new_boxes):
-            results.append((yolo_res[b_idx], matched_indices[b_idx]))
-        return results
+    def get_tracker(self, tid):
+        return next((t for t in self.trackers if t.id == tid), None)
 
     def get_smooth_gaze(self, tid):
-        return self.tracks.get(tid, {}).get("smooth_gaze")
+        trk = self.get_tracker(tid)
+        return trk.smooth_gaze if trk else None
 
     def set_smooth_gaze(self, tid, gaze_vec):
-        if tid in self.tracks:
-            self.tracks[tid]["smooth_gaze"] = gaze_vec
-
-    def _cleanup(self):
-        to_del = [tid for tid, t in self.tracks.items() if t["lost"] > self.max_lost]
-        for tid in to_del: del self.tracks[tid]
-
-    def _iou(self, b1, b2):
-        xA, yA = max(b1[0], b2[0]), max(b1[1], b2[1])
-        xB, yB = min(b1[2], b2[2]), min(b1[3], b2[3])
-        inter = max(0, xB - xA) * max(0, yB - yA)
-        area1 = (b1[2]-b1[0]) * (b1[3]-b1[1])
-        area2 = (b2[2]-b2[0]) * (b2[3]-b2[1])
-        return inter / float(area1 + area2 - inter + 1e-6)
+        trk = self.get_tracker(tid)
+        if trk: trk.smooth_gaze = gaze_vec
 
 def get_device():
-    import torch
-    if GLOBAL_CONFIG["force_device"] == "cuda" and torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+    return "cuda" if GLOBAL_CONFIG["force_device"] == "cuda" and torch.cuda.is_available() else "cpu"
 
 def make_face_mesh(static=False):
     import mediapipe as mp
@@ -152,6 +180,23 @@ KEY_IDS = [163, 157, 161, 154, 468, 390, 384, 388, 381, 473, 168]
 # ------------------------------------------------------------------ #
 #  HÌNH HỌC                                                           #
 # ------------------------------------------------------------------ #
+def get_face_basis(p_g, p_n, p_a, p_b):
+    """Returns local axes (V_face, Rf, Uf) for a face defined by glabella (168), nose tip (2), and side landmarks (331, 102)."""
+    # OY (Up): From Nose Tip (2) towards Glabella (168)
+    Uf = p_g - p_n; Uf /= np.linalg.norm(Uf)
+    
+    # OZ (Forward): From face normal (cross product of sides)
+    nf = np.cross(p_a - p_g, p_b - p_g)
+    Vf = -nf/np.linalg.norm(nf) if np.linalg.norm(nf) > 1e-6 else np.array([0,0,-1.])
+    if Vf[2] > 0: Vf = -Vf # Points "away" from camera (MediaPipe Z- is Forward)
+    
+    # OX (Right): Orthogonal to Forward and Up
+    Rf = np.cross(Uf, Vf); Rf /= np.linalg.norm(Rf)
+    
+    # Re-normalize to ensure orthogonality: Up = Forward x Right
+    Uf = np.cross(Vf, Rf)
+    return Vf, Rf, Uf
+
 def shortest_common_perpendicular(P1, P2, P3, P4):
     import numpy as np
     """
@@ -227,71 +272,23 @@ def _pt(world, idx):
     return np.array(world[idx]) if idx in world else None
 
 def calculate_gaze(world):
-    import numpy as np
     use_eye = GLOBAL_CONFIG.get("use_eye_gaze", True)
-    
-    if not use_eye:
-        # TỐI ƯU: Chỉ lấy 3 điểm để tính hướng mặt
-        p_face = {k: _pt(world, v) for k, v in dict(g=168, a=331, b=102).items()}
-        if any(v is None for v in p_face.values()): return None, None, None, None
-        
-        v_left  = p_face['a'] - p_face['g']
-        v_right = p_face['b'] - p_face['g']
-        nf = np.cross(v_left, v_right)
-        nn = np.linalg.norm(nf)
-        V_face = nf/nn if nn > 1e-6 else np.array([0,0,-1.])
-        if V_face[2] > 0: V_face = -V_face
-        return None, None, p_face['g'], V_face
-
-    # Chế độ đầy đủ: Mặt + Mắt
-    ids = dict(l1=163,l2=157,l3=161,l4=154,lp=468,
-               r1=390,r2=384,r3=388,r4=381,rp=473,
-               g=168, a=331, b=102)
-    p = {k: _pt(world, v) for k, v in ids.items()}
+    pts_ids = dict(g=168, n=2, a=331, b=102)
+    if use_eye: pts_ids.update(l1=163,l2=157,l3=161,l4=154,lp=468,r1=390,r2=384,r3=388,r4=381,rp=473)
+    p = {k: _pt(world, v) for k, v in pts_ids.items()}
     if any(v is None for v in p.values()): return None, None, None, None
+
+    V_face, Rf, Uf = get_face_basis(p['g'], p['n'], p['a'], p['b'])
+    if not use_eye: return None, None, p['g'], V_face
 
     aL, dL = process_eye(p['l1'], p['l2'], p['l3'], p['l4'], p['lp'])
     aR, dR = process_eye(p['r1'], p['r2'], p['r3'], p['r4'], p['rp'])
     if aL is None or aR is None: return None, None, None, None
 
-    alpha_avg = (aL + aR) / 2.0
-    d_avg     = (dL + dR) / 2.0
-
-    # Trục khuôn mặt: V_face, Rf (Right), Uf (Up)
-    # 1. V_face: Pháp tuyến mặt phẳng 168(g), 102(b), 331(a)
-    # Z MediaPipe World: + là Back (vào trong màn hình), - là Front (về phía camera).
-    # Ta cần V_face hướng về Camera (Z âm).
-    v_left  = p['a'] - p['g'] # 331 (Trái mẫu) - 168
-    v_right = p['b'] - p['g'] # 102 (Phải mẫu) - 168
-    
-    nf = np.cross(v_left, v_right)
-    nn = np.linalg.norm(nf)
-    V_face = nf/nn if nn > 1e-6 else np.array([0,0,-1.])
-    if V_face[2] > 0: V_face = -V_face # Ép hướng Front
-
-    # 2. Rf (Right): Hướng từ Trái sang Phải hốc mắt (X dương)
-    Rf = p['b'] - p['a'] # Landmarks 102 - 331
-    Rf = Rf - np.dot(Rf, V_face) * V_face
-    nr = np.linalg.norm(Rf)
-    Rf = Rf/nr if nr > 1e-6 else np.array([1.,0,0])
-    
-    # 3. Uf (Up): V_face là Front (Z-), Rf là Right (X+). 
-    # Theo quy tắc bàn tay phải (X, Y, Z), Y = Z x X.
-    Uf = np.cross(V_face, Rf)
-    if Uf[1] < 0: Uf = -Uf # Đảm bảo hướng Up (Y dương)
-
-    # Phép cộng Vector (Bẻ hướng)
-    # GAZE_SENSITIVITY: 
-    S_H = GLOBAL_CONFIG.get("S_H", 28.0)
-    S_V = GLOBAL_CONFIG.get("S_V", 12.35)
-    
-    ar = np.radians(alpha_avg)
-    # Bẻ hướng theo từng trục độc lập
-    V_final_unnorm = V_face + d_avg * (np.cos(ar) * S_H * Rf + np.sin(ar) * S_V * Uf)
-    nv = np.linalg.norm(V_final_unnorm)
-    V_final = V_final_unnorm / nv if nv > 1e-6 else V_face
-    
-    return alpha_avg, d_avg, p['g'], V_final
+    al_avg, d_avg = (aL + aR)/2.0, (dL + dR)/2.0
+    ar = np.radians(al_avg)
+    V_final = V_face + d_avg * (np.cos(ar) * GLOBAL_CONFIG["S_H"] * Rf + np.sin(ar) * GLOBAL_CONFIG["S_V"] * Uf)
+    return al_avg, d_avg, p['g'], V_final / np.linalg.norm(V_final)
 
 def build_coords(face_lms, world_lms, x1, y1, w_c, h_c):
     import numpy as np
@@ -384,75 +381,46 @@ def draw_hud(frame, fps, alpha, dist, show_mesh, show_ids):
 # ------------------------------------------------------------------ #
 #  SHARED FRAME PROCESSOR (Batch + Webcam dùng chung)                  #
 # ------------------------------------------------------------------ #
-def process_frame(frame, tracked_faces, face_mesh, tracker=None, show_mesh=True, show_ids=False, vis2d=False):
-    """
-    Xử lý 1 frame: landmark → tính gaze → vẽ dựa trên tracked_faces [(box, id), ...].
-    Hỗ trợ làm mượt riêng biệt cho từng khuôn mặt nếu có tracker.
-    Trả về: (rows, None)
-    """
-    import numpy as np
+def process_frame(frame, tracked_faces, tracker=None, face_mesh=None, show_mesh=True, show_ids=False, vis2d=False):
     oh, ow = frame.shape[:2]
     rows = []
-    current_v = None
-
-    if not tracked_faces:
-        return rows, None  # không có mặt
-
-    for box, tid in tracked_faces:
-        color = FACE_COLOR
+    for box, tid in (tracked_faces or []):
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-        x1, y1 = max(0,x1), max(0,y1)
-        x2, y2 = min(ow,x2), min(oh,y2)
-        crop = frame[y1:y2, x1:x2]
+        # Padded Crop for Face Mesh (Direct ROI)
+        bw, bh = x2-x1, y2-y1
+        p_val = GLOBAL_CONFIG.get("roi_padding", 0.355)
+        pad_w, pad_h = int(bw*p_val), int(bh*p_val)
+        cx1, cy1 = max(0, x1-pad_w), max(0, y1-pad_h)
+        cx2, cy2 = min(ow, x2+pad_w), min(oh, y2+pad_h)
+        crop = frame[cy1:cy2, cx1:cx2]
         if crop.size == 0: continue
-        hc, wc = crop.shape[:2]
+        cv2.rectangle(frame, (x1,y1), (x2,y2), FACE_COLOR, 1)
 
-        # VẼ KHUNG TRƯỚC: Đảm bảo luôn thấy box nếu YOLO detect được
-        cv2.rectangle(frame, (x1,y1),(x2,y2), color, 1)
+        # Use per-ID dedicated FaceMesh if tracker exists, else fallback to face_mesh
+        trk = tracker.get_tracker(tid) if tracker else None
+        mesh_obj = (trk.get_mesh() if trk else None) or face_mesh
+        if not mesh_obj: continue
 
-        mpr = face_mesh.process(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        mpr = mesh_obj.process(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
         if not mpr.multi_face_landmarks: continue
+        px, wc_d = build_coords(mpr.multi_face_landmarks[0], getattr(mpr, 'multi_face_world_landmarks', [None])[0], cx1, cy1, crop.shape[1], crop.shape[0])
 
-        wlms = getattr(mpr, 'multi_face_world_landmarks', None)
-        px, wc_d = build_coords(
-            mpr.multi_face_landmarks[0],
-            wlms[0] if wlms else None,
-            x1, y1, wc, hc
-        )
+        if vis2d: (draw_iris(frame, px), draw_eye_geometry(frame, px, wc_d))
+        if show_ids or vis2d: draw_key_ids(frame, px)
 
-        # --- Vẽ tùy chế độ ---
-        # Bỏ vẽ Iris theo yêu cầu
-        if vis2d:
-            draw_iris(frame, px)
-            draw_eye_geometry(frame, px, wc_d)
-        if show_ids or vis2d:
-            draw_key_ids(frame, px)
-
-        # --- Tính & vẽ gaze ---
-        alpha_val, d_val, _, Vf = calculate_gaze(wc_d)
+        al, d, _, Vf = calculate_gaze(wc_d)
         if Vf is not None:
-            # EMA Smoothing riêng cho từng khuôn mặt (ID)
-            if tracker is not None:
+            if tracker:
                 prev_v = tracker.get_smooth_gaze(tid)
                 if prev_v is not None:
                     alpha = GLOBAL_CONFIG.get("smooth_alpha", 0.3)
-                    Vf = alpha * Vf + (1 - alpha) * prev_v
-                    nv = np.linalg.norm(Vf)
-                    if nv > 1e-6: Vf /= nv
+                    Vf = (alpha*Vf + (1-alpha)*prev_v); Vf /= np.linalg.norm(Vf)
                 tracker.set_smooth_gaze(tid, Vf)
             
-            draw_arrow(frame, px, Vf, wc, hc, color=color)
-            
-            # Chỉ hiển thị text Alpha/D nếu có giá trị (chế độ Mặt+Mắt)
-            txt = f"A:{alpha_val:.1f} D:{d_val:.4f}" if alpha_val is not None else "FACE MODE"
-            cv2.putText(frame, txt, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-
-            rows.append({
-                "alpha_degrees": alpha_val if alpha_val is not None else 0, 
-                "distance_to_O": d_val if d_val is not None else 0,
-                "final_gaze_vector": f"({Vf[0]:.4f}, {Vf[1]:.4f}, {Vf[2]:.4f})"
-            })
-
+            draw_arrow(frame, px, Vf, crop.shape[1], crop.shape[0], color=FACE_COLOR)
+            txt = f"A:{al:.1f} D:{d:.4f}" if al is not None else "FACE MODE"
+            cv2.putText(frame, txt, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, FACE_COLOR, 1)
+            rows.append({"alpha_degrees": al or 0, "distance_to_O": d or 0, "final_gaze_vector": f"({Vf[0]:.4f}, {Vf[1]:.4f}, {Vf[2]:.4f})"})
     return rows, None
 
 # ------------------------------------------------------------------ #
@@ -471,10 +439,9 @@ def run_batch():
         print(f"  [{i+1}/{len(imgs)}] Đang xử lý: {path.name}...")
         frame = cv2.imread(str(path))
         if frame is None: continue
-        # Sử dụng GLOBAL_CONFIG.show_ids, không smoothing cho batch (vì ảnh rời rạc)
         res = yolo(frame, conf=GLOBAL_CONFIG["yolo_conf"], imgsz=640, verbose=False)[0]
         tracked = [(box, i) for i, box in enumerate(res.boxes)] if res.boxes else []
-        rows, _ = process_frame(frame, tracked, fm, show_mesh=True, show_ids=GLOBAL_CONFIG["show_ids"])
+        rows, _ = process_frame(frame, tracked, face_mesh=fm, show_mesh=True, show_ids=GLOBAL_CONFIG["show_ids"])
         for r in rows:
             all_rows.append({"image_name": path.name, **r})
         cv2.imwrite(str(OUTPUT_BATCH/path.name), frame)
@@ -498,8 +465,7 @@ def run_webcam():
     dev = get_device()
     print(f"  [*] Khởi tạo Face Detection trên: {dev.upper()}")
     yolo = YOLO(str(YOLO_FACE_MODEL)).to(dev)
-    print("  [*] Khởi tạo Landmark Extractor trên: CPU (MediaPipe)")
-    fm   = make_face_mesh(static=False)
+    print("  [*] Khởi tạo Landmark Extractor trên: Per-Face Instances")
     # Thử mở camera với các backend khác nhau nếu lỗi
     cap = cv2.VideoCapture(CAMERA_ID, cv2.CAP_DSHOW) if sys.platform == "win32" else cv2.VideoCapture(CAMERA_ID)
     if not cap.isOpened():
@@ -525,24 +491,34 @@ def run_webcam():
     last_a, last_d = None, None
 
     print("  [*] Bắt đầu hiển thị. Nhấn 'Q' để thoát.")
-    last_v = None
     tracker = FaceTracker()
     last_tracked_faces = []
     frame_idx = 0
+    fm_shared = None # Shared mesh for Fast Mode
+    
     while True:
         try:
             ret, frame = cap.read()
-            if not ret or frame is None: 
-                print("  [ERR] Không nhận được frame từ camera.")
-                break
-            
+            if not ret or frame is None: break
             frame_idx += 1
-            # YOLO mỗi 5 frames
-            if frame_idx % 5 == 0 or not last_tracked_faces:
-                res = yolo(frame, conf=GLOBAL_CONFIG["yolo_conf"], imgsz=640, verbose=False)[0]
-                last_tracked_faces = tracker.update(res.boxes)
+            
+            # Decide Mode
+            multi = GLOBAL_CONFIG["multi_face"]
+            if multi:
+                if frame_idx % 5 == 0 or not last_tracked_faces:
+                    res = yolo(frame, conf=GLOBAL_CONFIG["yolo_conf"], imgsz=640, verbose=False)[0]
+                    last_tracked_faces = tracker.update(res.boxes)
+                rows, _ = process_frame(frame, last_tracked_faces, tracker=tracker, show_mesh=show_mesh, show_ids=show_ids)
+            else:
+                # Fast Mode: Only largest face, no tracker
+                if not fm_shared: fm_shared = make_face_mesh(static=False)
+                res = yolo(frame, conf=GLOBAL_CONFIG["yolo_conf"], imgsz=320, verbose=False)[0]
+                if res.boxes:
+                    # Pick largest face
+                    best_box = max(res.boxes, key=lambda b: (b.xyxy[0][2]-b.xyxy[0][0])*(b.xyxy[0][3]-b.xyxy[0][1]))
+                    rows, _ = process_frame(frame, [(best_box, 0)], face_mesh=fm_shared, show_mesh=show_mesh, show_ids=show_ids)
+                else: rows = []
 
-            rows, _ = process_frame(frame, last_tracked_faces, fm, tracker=tracker, show_mesh=show_mesh, show_ids=show_ids)
             if rows:
                 last_a, last_d = rows[-1]['alpha_degrees'], rows[-1]['distance_to_O']
 
@@ -570,7 +546,8 @@ def run_webcam():
             traceback.print_exc()
             break
 
-    cap.release(); fm.close(); cv2.destroyAllWindows()
+    if fm_shared: fm_shared.close()
+    cap.release(); cv2.destroyAllWindows()
     print("[DONE] Webcam đã đóng.\n")
 
 # ------------------------------------------------------------------ #
@@ -591,7 +568,7 @@ def run_vis2d():
         if frame is None: continue
         res = yolo(frame, conf=GLOBAL_CONFIG["yolo_conf"], imgsz=640, verbose=False)[0]
         tracked = [(box, i) for i, box in enumerate(res.boxes)] if res.boxes else []
-        process_frame(frame, tracked, fm, show_mesh=True, show_ids=GLOBAL_CONFIG["show_ids"], vis2d=True)
+        process_frame(frame, tracked, face_mesh=fm, show_mesh=True, show_ids=GLOBAL_CONFIG["show_ids"], vis2d=True)
         out = OUTPUT_VIS_2D / f"vis_{path.name}"
         cv2.imwrite(str(out), frame)
         print(f"    [✓] {out.name}")
@@ -622,14 +599,19 @@ def run_vis3d():
             if not res.boxes: continue
             box = res.boxes[0]
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            x1, y1 = max(0, x1), max(0, y1); x2, y2 = min(ow, x2), min(oh, y2)
-            crop = frame[y1:y2, x1:x2]
+            bw, bh = x2-x1, y2-y1
+            p_val = GLOBAL_CONFIG.get("roi_padding", 0.355)
+            pad_w, pad_h = int(bw*p_val), int(bh*p_val)
+            cx1, cy1 = max(0, x1-pad_w), max(0, y1-pad_h)
+            cx2, cy2 = min(ow, x2+pad_w), min(oh, y2+pad_h)
+            crop = frame[cy1:cy2, cx1:cx2]
+            
             mpr = fm.process(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
             if not mpr.multi_face_landmarks: continue
 
             wlms = getattr(mpr, 'multi_face_world_landmarks', None)
             wlms0 = wlms[0] if wlms else None
-            _, wc_d = build_coords(mpr.multi_face_landmarks[0], wlms0, x1, y1, *crop.shape[:2][::-1])
+            _, wc_d = build_coords(mpr.multi_face_landmarks[0], wlms0, cx1, cy1, crop.shape[1], crop.shape[0])
 
             fig = go.Figure()
 
@@ -696,19 +678,13 @@ def run_vis3d():
             # 3. Face Basis (168) & Final Gaze
             p168 = _pt(wc_d, 168)
             alpha, d, _, Vf = calculate_gaze(wc_d)
-            if p168 is not None:
-                v_l, v_r = wc_d[331]-p168, wc_d[102]-p168
-                nf = np.cross(v_l, v_r); nf /= np.linalg.norm(nf)
-                if nf[2] > 0: nf = -nf
-                rf = wc_d[102]-wc_d[331]; rf -= np.dot(rf, nf)*nf; rf /= np.linalg.norm(rf)
-                uf = np.cross(nf, rf)
-                if uf[1] < 0: uf = -uf
-                
+            if p168 is not None and 2 in wc_d:
+                nf, rf, uf = get_face_basis(p168, wc_d[2], wc_d[331], wc_d[102])
                 s_f = 0.08
-                for idx, (v, c, n) in enumerate([(nf, 'black', 'Pháp tuyến mặt'), (rf, 'orange', 'Trục ngang mặt'), (uf, 'purple', 'Trục dọc mặt')]):
+                for v, c, n in [(nf, 'black', 'Pháp tuyến'), (rf, 'orange', 'Ngang mặt'), (uf, 'purple', 'Dọc mặt')]:
                     fig.add_trace(go.Scatter3d(x=[p168[0], p168[0]+v[0]*s_f], y=[p168[1], p168[1]+v[1]*s_f], z=[p168[2], p168[2]+v[2]*s_f], mode='lines', line=dict(color=c, width=6), name=n))
                 if Vf is not None:
-                    fig.add_trace(go.Scatter3d(x=[p168[0], p168[0]+Vf[0]*0.18], y=[p168[1], p168[1]+Vf[1]*0.18], z=[p168[2], p168[2]+Vf[2]*0.18], mode='lines', line=dict(color='red', width=10), name='HƯỚNG NHÌN CUỐI'))
+                    fig.add_trace(go.Scatter3d(x=[p168[0], p168[0]+Vf[0]*0.18], y=[p168[1], p168[1]+Vf[1]*0.18], z=[p168[2], p168[2]+Vf[2]*0.18], mode='lines', line=dict(color='red', width=10), name='HƯỚNG NHÌN'))
 
             # Layout config
             # Camera Up: Y+ (Up). View from Front (Z-).
@@ -804,27 +780,31 @@ def run_video():
         curr_f = 0
         tracker = FaceTracker()
         last_tracked = []
-        last_v = None # State cho smoothing
+        fm_shared = None
         v_start_t = time.time()
         v_prev_t = v_start_t
-        proc_fps = 0
         
         try:
             while True:
                 ret, frame = cap.read()
                 if not ret or frame is None: break
                 curr_f += 1
-                
-                if vw_orig != target_w:
-                    frame = cv2.resize(frame, (target_w, target_h))
+                if vw_orig != target_w: frame = cv2.resize(frame, (target_w, target_h))
 
-                yolo_step = 5 if safe_choice == "2" else 3
-                if curr_f % yolo_step == 0 or not last_tracked:
+                multi = GLOBAL_CONFIG["multi_face"]
+                if multi:
+                    yolo_step = 5 if safe_choice == "2" else 3
+                    if curr_f % yolo_step == 0 or not last_tracked:
+                        res = yolo(frame, conf=GLOBAL_CONFIG["yolo_conf"], imgsz=yolo_imgsz, verbose=False)[0]
+                        last_tracked = tracker.update(res.boxes)
+                    rows, _ = process_frame(frame, last_tracked, tracker=tracker, show_mesh=show_mesh, show_ids=show_ids)
+                else:
+                    if not fm_shared: fm_shared = make_face_mesh(static=False)
                     res = yolo(frame, conf=GLOBAL_CONFIG["yolo_conf"], imgsz=yolo_imgsz, verbose=False)[0]
-                    last_tracked = tracker.update(res.boxes)
-                
-                if last_tracked:
-                    rows, _ = process_frame(frame, last_tracked, fm, tracker=tracker, show_mesh=show_mesh, show_ids=show_ids)
+                    if res.boxes:
+                        best_box = max(res.boxes, key=lambda b: (b.xyxy[0][2]-b.xyxy[0][0])*(b.xyxy[0][3]-b.xyxy[0][1]))
+                        rows, _ = process_frame(frame, [(best_box, 0)], face_mesh=fm_shared, show_mesh=show_mesh, show_ids=show_ids)
+                    else: rows = []
 
                 # Tính FPS xử lý
                 now = time.time()
@@ -864,65 +844,49 @@ def run_video():
             traceback.print_exc()
             
         cap.release(); writer.release()
+        if fm_shared: fm_shared.close()
         print(f"\n    [✓] Xong: {out_path.name}")
         
-    fm.close(); cv2.destroyAllWindows()
+    cv2.destroyAllWindows()
     print(f"\n[DONE] Hoàn tất xử lý video.\n")
 
 def run_toggle_ids():
     GLOBAL_CONFIG["show_ids"] = not GLOBAL_CONFIG["show_ids"]
-    print(f"  [CONFIG] Hiển thị Landmark IDs: {'BẬT' if GLOBAL_CONFIG['show_ids'] else 'TẮT'}")
+    print(f"  [CONFIG] Landmark IDs: {'BẬT' if GLOBAL_CONFIG['show_ids'] else 'TẮT'}")
 
 def run_toggle_gaze_mode():
     GLOBAL_CONFIG["use_eye_gaze"] = not GLOBAL_CONFIG["use_eye_gaze"]
-    mode = "Mặt + Mắt" if GLOBAL_CONFIG["use_eye_gaze"] else "Chỉ hướng Mặt"
-    print(f"  [CONFIG] Chế độ tính toán: {mode}")
+    print(f"  [CONFIG] Chế độ: {'Mặt+Mắt' if GLOBAL_CONFIG['use_eye_gaze'] else 'Chỉ Mặt'}")
 
 def run_toggle_device():
     import torch
-    if GLOBAL_CONFIG["force_device"] == "cpu":
-        if torch.cuda.is_available():
-            GLOBAL_CONFIG["force_device"] = "cuda"
-            print(f"  [CONFIG] Đã chuyển sang: GPU ({torch.cuda.get_device_name(0)})")
-        else:
-            print("\n  [!] KHÔNG THỂ CHUYỂN SANG GPU:")
-            if "cpu" in torch.__version__:
-                print("      -> Nguyên nhân: Bạn đang dùng phiên bản Torch-CPU.")
-                print("      -> Khắc phục: pip install torch --index-url https://download.pytorch.org/whl/cu121")
-            else:
-                print("      -> Nguyên nhân: CUDA không khả dụng hoặc driver lỗi.")
-            return
-    else:
-        GLOBAL_CONFIG["force_device"] = "cpu"
-        print(f"  [CONFIG] Đã chuyển sang: CPU")
+    GLOBAL_CONFIG["force_device"] = "cpu" if GLOBAL_CONFIG["force_device"] == "cuda" else "cuda"
+    print(f"  [CONFIG] Thiết bị: {GLOBAL_CONFIG['force_device'].upper()}")
+
+def run_toggle_multi_face():
+    GLOBAL_CONFIG["multi_face"] = not GLOBAL_CONFIG["multi_face"]
+    print(f"  [CONFIG] Chế độ: {'Đa khuôn mặt (Robust)' if GLOBAL_CONFIG['multi_face'] else 'Đơn khuôn mặt (Fast)'}")
 
 def run_settings_menu():
     while True:
-        print("\n" + "="*40)
-        print("      CÀI ĐẶT THAM SỐ HỆ THỐNG")
-        print("="*40)
-        print(f"  1. Smooth Alpha [{GLOBAL_CONFIG['smooth_alpha']}] (0.1 - 0.9)")
-        print(f"  2. Độ nhạy Ngang S_H [{GLOBAL_CONFIG['S_H']}]")
-        print(f"  3. Độ nhạy Dọc S_V [{GLOBAL_CONFIG['S_V']}]")
-        print(f"  4. YOLO Confidence [{GLOBAL_CONFIG['yolo_conf']}] (0.1 - 0.9)")
-        print("  0. Quay lại Menu chính")
-        
-        c = input("\nChọn mục cần chỉnh: ").strip()
+        print(f"\n{'='*40}\n  CÀI ĐẶT THAM SỐ\n{'='*40}")
+        print(f"  1. Smooth Alpha [{GLOBAL_CONFIG['smooth_alpha']}]")
+        print(f"  2. S_H [{GLOBAL_CONFIG['S_H']}]")
+        print(f"  3. S_V [{GLOBAL_CONFIG['S_V']}]")
+        print(f"  4. YOLO Conf [{GLOBAL_CONFIG['yolo_conf']}]")
+        print(f"  5. ROI Padding [{GLOBAL_CONFIG['roi_padding']}]")
+        print(f"  0. Quay lại")
+        c = input("\nChọn: ").strip()
         if c == '0': break
         try:
-            if c == '1':
-                v = float(input("Nhập Smooth Alpha mới: "))
-                if 0 < v < 1: GLOBAL_CONFIG['smooth_alpha'] = v
-            elif c == '2':
-                GLOBAL_CONFIG['S_H'] = float(input("Nhập S_H mới: "))
-            elif c == '3':
-                GLOBAL_CONFIG['S_V'] = float(input("Nhập S_V mới: "))
-            elif c == '4':
-                v = float(input("Nhập YOLO Confidence mới: "))
-                if 0 < v < 1: GLOBAL_CONFIG['yolo_conf'] = v
-            print("  [OK] Đã cập nhật.")
-        except ValueError:
-            print("  [!] Giá trị không hợp lệ.")
+            v = float(input("Nhập giá trị mới: "))
+            if c == '1': GLOBAL_CONFIG['smooth_alpha'] = v
+            elif c == '2': GLOBAL_CONFIG['S_H'] = v
+            elif c == '3': GLOBAL_CONFIG['S_V'] = v
+            elif c == '4': GLOBAL_CONFIG['yolo_conf'] = v
+            elif c == '5': GLOBAL_CONFIG['roi_padding'] = v
+            print("  [OK]")
+        except: print("  [!]")
 
 # ------------------------------------------------------------------ #
 #  MENU                                                                #
@@ -930,6 +894,7 @@ def run_settings_menu():
 def get_menu():
     st_ids = "BẬT" if GLOBAL_CONFIG["show_ids"] else "TẮT"
     st_gaze = "Mặt+Mắt" if GLOBAL_CONFIG["use_eye_gaze"] else "Chỉ Mặt"
+    st_mode = "Robust" if GLOBAL_CONFIG["multi_face"] else "Fast"
     dev = GLOBAL_CONFIG["force_device"].upper()
     return f"""
 ╔══════════════════════════════════════════╗
@@ -943,7 +908,8 @@ def get_menu():
 ║  6  Cấu hình Landmark IDs [{st_ids}]         ║
 ║  7  Chế độ Gaze [{st_gaze}]            ║
 ║  8  Thiết bị [{dev}]                     ║
-║  9  Cài đặt tham số nâng cao             ║
+║  9  Chế độ [{st_mode}] (Robust/Fast)      ║
+║  S  Cài đặt tham số nâng cao             ║
 ║  0  Thoát                                ║
 ╚══════════════════════════════════════════╝
 Chọn: """
@@ -956,7 +922,8 @@ HANDLERS = {
     '6': run_toggle_ids,
     '7': run_toggle_gaze_mode,
     '8': run_toggle_device,
-    '9': run_settings_menu
+    '9': run_toggle_multi_face, # Phím 9 chuyển mode
+    'S': run_settings_menu      # Phím S cho cài đặt
 }
 
 if __name__ == "__main__":

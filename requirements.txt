@@ -1,14 +1,24 @@
-# Core Dependencies
-opencv-python
-numpy
-mediapipe
-ultralytics
-plotly
-pandas
-scipy
-torch
-torchvision
-torchaudio
+# Core Dependencies (Geometric Gaze Estimation)
+# To install: pip install -r requirements.txt
 
-# Recommended GPU Installation (for CUDA 12.1):
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# Computer Vision & ML
+opencv-python==4.13.0.92
+numpy==2.0.2
+mediapipe==0.10.9
+ultralytics==8.4.21
+
+# Math & Signal Processing
+scipy==1.13.1
+filterpy==1.4.5
+
+# Visualization & Data
+plotly==6.6.0
+matplotlib==3.9.4
+pandas==2.3.3
+
+# Deep Learning (with CUDA 12.1 support)
+# NOTE: If installing on CPU-only, remove the +cu121 and index-url
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+torchaudio==2.5.1+cu121
+--index-url https://download.pytorch.org/whl/cu121
