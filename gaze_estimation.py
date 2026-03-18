@@ -181,20 +181,28 @@ KEY_IDS = [163, 157, 161, 154, 468, 390, 384, 388, 381, 473, 168]
 #  HÌNH HỌC                                                           #
 # ------------------------------------------------------------------ #
 def get_face_basis(p_g, p_n, p_a, p_b):
-    """Returns local axes (V_face, Rf, Uf) for a face defined by glabella (168), nose tip (2), and side landmarks (331, 102)."""
-    # OY (Up): From Nose Tip (2) towards Glabella (168)
-    Uf = p_g - p_n; Uf /= np.linalg.norm(Uf)
+    """
+    Returns local axes (V_face, Rf, Uf) for a face.
+    Construction Order:
+    1. Up_ref = 168 - 2
+    2. Vf = Initial Normal (cross sides)
+    3. Rf (OX) = cross(Up_ref, Vf)
+    4. Uf (OY) = cross(Vf, Rf)
+    """
+    # 1. Reference Up vector from Nose to Glabella
+    U_ref = p_g - p_n; U_ref /= (np.linalg.norm(U_ref) + 1e-9)
     
-    # OZ (Forward): From face normal (cross product of sides)
+    # 2. OZ (Forward): Initial face normal (cross product of sides)
     nf = np.cross(p_a - p_g, p_b - p_g)
     Vf = -nf/np.linalg.norm(nf) if np.linalg.norm(nf) > 1e-6 else np.array([0,0,-1.])
-    if Vf[2] > 0: Vf = -Vf # Points "away" from camera (MediaPipe Z- is Forward)
+    if Vf[2] > 0: Vf = -Vf # Points "forward" relative to face (MediaPipe Z- is Forward)
     
-    # OX (Right): Orthogonal to Forward and Up
-    Rf = np.cross(Uf, Vf); Rf /= np.linalg.norm(Rf)
+    # 3. OX (Right/Ngang mặt): Cross of Reference Up and Forward
+    Rf = np.cross(U_ref, Vf); Rf /= (np.linalg.norm(Rf) + 1e-9)
     
-    # Re-normalize to ensure orthogonality: Up = Forward x Right
-    Uf = np.cross(Vf, Rf)
+    # 4. OY (Up/Dọc mặt): Perfectly orthogonal Up from Forward and Right
+    Uf = np.cross(Vf, Rf); Uf /= (np.linalg.norm(Uf) + 1e-9)
+    
     return Vf, Rf, Uf
 
 def shortest_common_perpendicular(P1, P2, P3, P4):
