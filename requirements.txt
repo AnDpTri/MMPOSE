@@ -1,4 +1,4 @@
-# Core Dependencies (Geometric Gaze Estimation)
+# Core Dependencies (Geometric Gaze Estimation - PC/CUDA optimized)
 # To install: pip install -r requirements.txt
 
 # Computer Vision & ML
@@ -7,8 +7,7 @@ numpy==2.0.2
 mediapipe==0.10.9
 ultralytics==8.4.21
 
-# Inference Engines
-# Note: Use 'onnxruntime' (without -gpu) for Raspberry Pi/CPU-only
+# Inference Engine (GPU/CUDA version)
 onnxruntime-gpu==1.19.2
 
 # Math & Signal Processing
@@ -21,7 +20,6 @@ matplotlib==3.9.4
 pandas==2.3.3
 
 # Deep Learning (with CUDA 12.1 support)
-# NOTE: If installing on Raspberry Pi, replace with 'torch torchvision' (no +cu121)
 torch==2.5.1+cu121
 torchvision==0.20.1+cu121
 torchaudio==2.5.1+cu121

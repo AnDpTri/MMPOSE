@@ -15,12 +15,10 @@ Phím tắt (chế độ Webcam):
 =============================================================
 """
 
-import cv2, sys, csv, time, torch, threading
+import cv2, sys, csv, time, threading
 import numpy as np
 from pathlib import Path
-from scipy.optimize import linear_sum_assignment
-
-# Note: Heavy libraries (mediapipe, ultralytics, plotly, filterpy, onnxruntime) are lazy-loaded unless specified.
+# Note: Heavy libraries (torch, mediapipe, ultralytics, plotly, pandas, filterpy, onnxruntime) are lazy-loaded unless specified.
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
@@ -86,14 +84,24 @@ def auto_setup_hardware():
         print(f"  [AUTO] Phát hiện Raspberry Pi/ARM. Đã cấu hình chế độ Low-Power.")
     else:
         # Tối ưu cho Desktop (Ưu tiên GPU nếu có)
-        if torch.cuda.is_available():
+        has_torch = False
+        try:
+            import torch
+            has_torch = True
+        except: pass
+        # Deep Learning (Standard CPU versions)
+        # Note: Torch on RPi is optional. The engine will fallback to ONNX/MediaPipe if missing.
+        # If you need YOLO Native, uncomment below:
+        # torch==2.5.1
+        # torchvision==0.20.1
+        if has_torch and torch.cuda.is_available():
             GLOBAL_CONFIG["force_device"] = "cuda"
             GLOBAL_CONFIG["use_onnx"] = True
             print(f"  [AUTO] Phát hiện Desktop + CUDA. Đã bật GPU Acceleration.")
         else:
             GLOBAL_CONFIG["force_device"] = "cpu"
             GLOBAL_CONFIG["use_onnx"] = False
-            print(f"  [AUTO] Phát hiện Desktop CPU-only. Fallback về MediaPipe.")
+            print(f"  [AUTO] Phát hiện Desktop CPU-only (hoặc thiếu Torch). Fallback về MediaPipe.")
 
 # Gọi tự động khi khởi động
 auto_setup_hardware()
@@ -195,7 +203,7 @@ class ONNXGazeEngine:
         
         # Giả lập object .xyxy tương đương ultralytics để reuse code
         class FakeBox:
-            def __init__(self, x): self.xyxy = [torch.tensor(x)]
+            def __init__(self, x): self.xyxy = [np.array(x)]
             
         final_boxes = []
         for i in indices:
@@ -284,8 +292,8 @@ class KalmanBoxTracker:
         self.kf.predict(); self.age += 1
         if self.time_since_update > 0: self.hit_streak = 0
         self.time_since_update += 1
-        self.history.append(self._x_to_box(self.kf.x))
-        return self.history[-1][0]
+        self.history.append(self._x_to_box(self.kf.x)[0])
+        return self.history[-1]
 
     def get_state(self): return self._x_to_box(self.kf.x)[0]
 
@@ -299,6 +307,7 @@ class KalmanBoxTracker:
 
 class FaceTracker:
     def __init__(self, iou_threshold=0.3, max_lost=15, min_hits=3):
+        from scipy.optimize import linear_sum_assignment
         self.iou_threshold, self.max_lost, self.min_hits = iou_threshold, max_lost, min_hits
         self.trackers, self.frame_count = [], 0
 
@@ -326,6 +335,7 @@ class FaceTracker:
         return ret
 
     def _associate(self, iou_mat, num_dets, num_trks):
+        from scipy.optimize import linear_sum_assignment
         if not num_trks or not num_dets: return np.empty((0,2), int), np.arange(num_dets), np.arange(num_trks)
         row_ind, col_ind = linear_sum_assignment(-iou_mat)
         matched = np.array([[r, c] for r, c in zip(row_ind, col_ind) if iou_mat[r, c] >= self.iou_threshold])
@@ -345,6 +355,7 @@ class FaceTracker:
         if trk: trk.smooth_gaze = gaze_vec
 
 def get_device():
+    import torch
     return "cuda" if GLOBAL_CONFIG["force_device"] == "cuda" and torch.cuda.is_available() else "cpu"
 
 def make_face_mesh(static=False):

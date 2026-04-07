@@ -19,7 +19,8 @@ plotly==6.6.0
 matplotlib==3.9.4
 pandas==2.3.3
 
-# Deep Learning (Standard CPU versions)
-torch==2.5.1
-torchvision==0.20.1
-torchaudio==2.5.1
+# Optional: Deep Learning (Standard CPU versions)
+# PyTorch is heavy on RPi. The code will fallback to ONNX/MediaPipe if missing.
+# Uncomment if you specifically need native YOLOv8 (.pt)
+# torch==2.5.1
+# torchvision==0.20.1
