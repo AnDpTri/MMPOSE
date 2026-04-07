@@ -10,9 +10,9 @@ Dự án hình học ước lượng hướng nhìn (Geometric Gaze Estimation) 
 - **Yêu cầu**: Cài đặt CUDA Toolkit 11.8+ và cuDNN nếu muốn dùng GPU.
 
 ### Trên Raspberry Pi 4
-- **HĐH**: Raspberry Pi OS (Hệ điều hành 64-bit khuyên dùng) hoặc Ubuntu 22.04 AArch64.
+- **HĐH**: Raspberry Pi OS 64-bit (AArch64) khuyên dùng. (Môi trường 32-bit KHÔNG hỗ trợ).
+- **Python**: **BẮT BUỘC dùng Python 3.10, 3.11 hoặc 3.12**. (Hiện tại Python 3.13 CHƯA hỗ trợ MediaPipe trên ARM).
 - **RAM**: Tối thiểu 4GB.
-- **Yêu cầu**: Cài đặt các thư viện hệ thống cho OpenCV (xem mục 3).
 
 ---
 
@@ -46,32 +46,27 @@ Dự án tự động nhận diện RPi để chuyển sang chế độ tiết k
    sudo apt-get install -y libopencv-dev libatlas-base-dev libhdf5-dev libqt5gui5 libqt5test5
    ```
 2. Tạo môi trường ảo và cài đặt:
+   Nếu máy bạn có Python 3.13 làm mặc định, hãy dùng lệnh cài Python 3.11:
    ```bash
-   python3 -m venv venv
+   sudo apt install python3.11-venv
+   python3.11 -m venv venv
+   ```
+   Sau đó cài đặt như bình thường:
+   ```bash
    source venv/bin/activate
    pip install --upgrade pip
-   pip install opencv-python mediapipe ultralytics filterpy scipy
+   pip install -r requirements_rpi.txt
    ```
 3. Chạy chương trình:
    ```bash
-   python3 gaze_estimation.py
+   python gaze_estimation.py
    ```
 
 ---
 
 ## 4. Các tính năng chính
-
-- **Tự động cấu hình (Auto-Setup)**: 
-  - Khi chạy trên PC có CUDA: Hệ thống bật ONNX-GPU cho tốc độ cực cao.
-  - Khi chạy trên RPi: Hệ thống tự chuyển sang MediaPipe TFLite và bật `High FPS Mode` để đảm bảo video không bị giật.
-- **Chế độ Video**: Vì RPi có thể không có camera, bạn nên dùng phím **5** để xử lý các tệp video trong thư mục `input/video/`.
-- **Thông số chi tiết**: Nhấn phím **D** trong menu chính để xem báo cáo về phần cứng đang chạy.
-
-## 5. Cấu trúc thư mục
-- `input/`: Chứa ảnh đầu vào.
-- `input/video/`: Chứa các video `.mp4`, `.avi` để xử lý theo lô.
-- `output/`: Kết quả xử lý ảnh và video.
-- `data/`: Nhật ký tọa độ hướng nhìn (CSV).
+- **Tự động cấu hình (Auto-Setup)**: Tự động phát hiện RPi để bật chế độ siêu tốc.
+- **Dễ dàng triển khai**: Đã có sẵn `setup_rpi.sh` để tự động hóa toàn bộ quy trình trên.
 
 ---
 *Chúc bạn có trải nghiệm tốt nhất với dự án!*
