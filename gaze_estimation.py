@@ -65,8 +65,16 @@ GLOBAL_CONFIG = {
     "detect_interval": 5,
     "high_fps_mode": False,
     "use_onnx": True,
-    "hw_detected": get_hardware_info()
+    "hw_detected": get_hardware_info(),
+    "has_mediapipe": True
 }
+
+try:
+    import mediapipe as mp
+except ImportError:
+    GLOBAL_CONFIG["has_mediapipe"] = False
+    GLOBAL_CONFIG["use_onnx"] = True
+    print(f"  [!] Canh bao: Khong tim thay MediaPipe. He thong tu dong chuyen sang Pure ONNX Mode.")
 
 def auto_setup_hardware():
     """Tự động điều chỉnh cấu hình dựa trên phần cứng thực tế."""
@@ -240,7 +248,7 @@ class ONNXGazeEngine:
         class Point:
             def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
         class LandmarkList:
-            def __init__(self, lms): self.landmark = [Point(p[0]/192, p[1]/192, p[2]/192) for p in lms]
+            def __init__(self, lms): self.landmark = [Point(float(p[0]/192), float(p[1]/192), float(p[2]/192)) for p in lms]
         class Result:
             def __init__(self, ml, mw): self.multi_face_landmarks = [ml]; self.multi_face_world_landmarks = [mw]
 
@@ -359,15 +367,21 @@ def get_device():
     return "cuda" if GLOBAL_CONFIG["force_device"] == "cuda" and torch.cuda.is_available() else "cpu"
 
 def make_face_mesh(static=False):
-    import mediapipe as mp
-    _mp_fm = mp.solutions.face_mesh
-    return _mp_fm.FaceMesh(
-        static_image_mode      = static,
-        max_num_faces          = 1,
-        refine_landmarks       = True,
-        min_detection_confidence = 0.5,
-        min_tracking_confidence  = 0.60, # Tăng lên để bám landmark chặt chẽ hơn
-    )
+    """Khởi tạo FaceMesh của MediaPipe nếu có."""
+    if not GLOBAL_CONFIG.get("has_mediapipe", True): 
+        return None
+        
+    try:
+        import mediapipe as mp
+        return mp.solutions.face_mesh.FaceMesh(
+            static_image_mode        = static,
+            max_num_faces            = 5 if GLOBAL_CONFIG["multi_face"] else 1,
+            refine_landmarks         = True,
+            min_detection_confidence = 0.5,
+            min_tracking_confidence  = 0.5
+        )
+    except:
+        return None
 
 def preprocess_face(crop, min_dim=None):
     import cv2
