@@ -29,3 +29,8 @@ Dự án ước lượng hướng mắt (Gaze Estimation) "Tiện Lợi Tuyệt 
 - **Tài liệu đầy đủ**: Chi tiết sơ đồ tại `PROJECT_ARCHITECTURE.md`.
 
 **Chào mừng bạn đến với thế giới "Clone & Run"!** 🚀🫡
+
+---
+
+## 📜 Bản quyền (License)
+Dự án này được cấp phép theo các điều khoản của **MIT License**. Xem chi tiết tại tệp [LICENSE](LICENSE).
