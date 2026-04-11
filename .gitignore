@@ -151,8 +151,12 @@ cython_debug/
 .vscode/
 
 # Project Specific - Data and Output
-input/
-output/
+input/**/*
+!input/**/
+!input/**/.gitkeep
+output/**/*
+!output/**/
+!output/**/.gitkeep
 data/
 *.mp4
 *.avi
