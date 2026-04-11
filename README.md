@@ -67,9 +67,9 @@ The system automatically detects your hardware and applies the best inference st
 ### 🏎️ Performance Benchmarks
 | Platform | Mode | Resolution | FPS |
 |---|---|---|---|
-| **PC (RTX 3060)** | Robust (Multi-face) | 720p | **23+** |
-| **PC (i7 CPU)** | Fast (Single-face) | 720p | **18+** |
-| **Raspberry Pi 4**| Low-Power | 480p | **12-15** |
+| **PC (RTX 3060)** | Robust (Multi-face) | 720p | *20+** |
+| **PC (i7 CPU)** | Fast (Single-face) | 720p | **13+** |
+| **Raspberry Pi 4**| Low-Power | 480p | **8-10** |
 
 ---
 
